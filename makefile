@@ -1,5 +1,6 @@
+TERM_EXEC = yes
 COMP_FLAGS = 
-ifeq ($(OS),Winows_NT)
+ifeq ($(OS), Winows_NT)
 	COMP_FLAGS += -s -lopengl32 -lgdi32
 else
 	UNAME_SYS := $(shell uname -s)
@@ -10,10 +11,15 @@ else
 	endif
 endif
 
-make: main.c
+make:
 	make clean
 	gcc -o main -Itigr $(COMP_FLAGS) tigr/tigr.c main.c
-	./main
+	./main $(TERM_EXEC)
+
+debug:
+	make clean
+	gcc -o main -g -Itigr $(COMP_FLAGS) tigr/tigr.c main.c
+	valgrind ./main $(TERM_EXEC)
 
 clean:
 	clear
