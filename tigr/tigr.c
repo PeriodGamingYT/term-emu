@@ -4995,7 +4995,9 @@ void tigrFree(Tigr* bmp) {
         if (win->win) {
             glXMakeCurrent(win->dpy, None, NULL);
             glXDestroyContext(win->dpy, win->glc);
-            XDestroyWindow(win->dpy, win->win);
+
+            // don't destroy context because glx takes care of that for us
+            // i think
             win->win = 0;
         }
     }

@@ -15,6 +15,8 @@
 #include <sys/ioctl.h>
 #include <string.h>
 #include <ctype.h>
+
+#define TIGR_GAPI_GL
 #include <tigr.h>
 
 #define CHILD_PID 0
@@ -34,6 +36,7 @@ typedef struct {
 	pid_t fork_pid;
 	fd_set desc_in;
 	int input_ready;
+	int is_prog_end;
 	int top_desc;
 	int bottom_desc;
 	int cursor_x;
@@ -141,9 +144,9 @@ int init_term(term_t *term) {
 
 			// done three seperate times for
 			// stdin, stdout, and stderr in that order
-			dup(term->bottom_desc) < 0 ||
-			dup(term->bottom_desc) < 0 ||
-			dup(term->bottom_desc) < 0 ||
+			dup2(term->bottom_desc, STDIN_FILENO) < 0 ||
+			dup2(term->bottom_desc, STDOUT_FILENO) < 0 ||
+			dup2(term->bottom_desc, STDERR_FILENO) < 0 ||
 			close(term->bottom_desc) < 0 ||
 			setsid() == ERR_PID ||
 			ioctl(0, TIOCSCTTY, 1) < 0
@@ -162,6 +165,7 @@ int init_term(term_t *term) {
  	return 0;
 }
 
+// something in here errors out, to do
 int term_fetch(term_t *term) {
 	if(
 		term == NULL || 
@@ -170,6 +174,10 @@ int term_fetch(term_t *term) {
 	) {
 		deinit_term(term);
 		return -1;
+	}
+
+	if(term->is_prog_end) {
+		return 0;
 	}
 
 	FD_ZERO(&term->desc_in);
@@ -218,16 +226,24 @@ int term_fetch(term_t *term) {
 
 		memset(term->input, 0, sizeof(term->input));
 	}
+
+	memset(term->buf, 0, sizeof(term->buf));
+	int read_result = read(
+		term->top_desc, 
+		term->buf, 
+		sizeof(term->buf)
+	);
 	
-	if(
-		read(
-			term->top_desc, 
-			term->buf, 
-			sizeof(term->buf)
-		) < 0
-	) {
+	if(read_result < 0) {
 		deinit_term(term);
 		return -1;
+	}
+
+	// if read_result is zero that means the program
+	// is done sending input
+	if(read_result == 0) {
+		term->is_prog_end = 1;
+		return 1;
 	}
 
 	return 0;
@@ -241,19 +257,39 @@ int term_buf_clear(term_t *term) {
 	memset(term->buf, 0, sizeof(term->buf));
 }
 
+int term_make_room(term_t *term) {
+	if(term == NULL) {
+		return -1;
+	}
+
+	// can be replaced with scrolling
+	memset(
+		term->term_image, 
+		' ', 
+		sizeof(term->term_image)
+	);
+
+	term->cursor_x = 0;
+	term->cursor_y = 0;
+}
+
 // may need to be reworked to have entire main loop inside here
 // because of escape codes
 int term_feed_char(term_t *term, char feed_char) {
+printf("is term null on line %d?\n", __LINE__);
 	if(term == NULL) {
 		return -1;
 	}
 
 	int index = (term->cursor_y * TERM_SIZE_X) + term->cursor_x;
+printf("index is %d and term size x * y is %d on line %d\n", index, TERM_SIZE_X * TERM_SIZE_Y, __LINE__);
 	if(
 		index < 0 || 
 		index >= TERM_SIZE_X * TERM_SIZE_Y
 	) {
-		return -1;
+
+		// can't fail because term is not null at this point
+		term_make_room(term);
 	}
 
 	switch(feed_char) {
@@ -294,20 +330,14 @@ int term_feed_char(term_t *term, char feed_char) {
 
 	if(term->cursor_y >= TERM_SIZE_Y) {
 
-		// can be replaced with scrolling
-		memset(
-			term->term_image, 
-			' ', 
-			sizeof(term->term_image)
-		);
-
-		term->cursor_x = 0;
-		term->cursor_y = 0;
+		// can't fail because term is not null at this point
+		term_make_room(term);
 	}
 }
 
 int main(int argc, char **argv, char **envp) {
 	term_t term = { 0 };
+	setvbuf(stdout, NULL, _IONBF, 0);
 	if(init_term(&term) < 0) {
 		return 1;
 	}
@@ -324,7 +354,6 @@ int main(int argc, char **argv, char **envp) {
 		}
 
 		child_argv[argc - 1] = NULL;
-		
 		//if(execvp(SHELL_PATH, argv) < 0) {
 		if(execvp(child_argv[0], child_argv) < 0) {
 			for(int i = 0; i < argc - 1; i++) {
@@ -352,7 +381,7 @@ int main(int argc, char **argv, char **envp) {
 		0
 	);
 	
-	while(!tigrClosed(tigr) && !tigrKeyDown(tigr, TK_ESCAPE)) {
+	while(!tigrClosed(tigr)) {
 		tigrClear(tigr, tigrRGB(24, 24, 24));
 		for(int y = 0; y < TERM_SIZE_Y; y++) {
 			int line_index = y * TERM_SIZE_X;
@@ -374,27 +403,35 @@ int main(int argc, char **argv, char **envp) {
 			*replace_char = temp_char;
 		}
 
-		if(term_fetch(&term) < 0) {
+		int fetch_result = term_fetch(&term);
+		if(fetch_result < 0) {
+printf("fetch result is less than 0 on line %d\n", __LINE__);
 			tigrFree(tigr);
 			deinit_term(&term);
 			return 1;
 		}
+printf("we didn't have fetch_result < 0 on line %d\n", __LINE__);
 
 		char *buf = term.buf;
+printf("buf is %s on line %d\n", buf, __LINE__);
 		for(
 			int i = 0; 
 			buf[i] != 0 && 
+			fetch_result > 0 &&
 			i < TERM_BUF_MAX; 
 			i++
 		) {
 			if(term_feed_char(&term, buf[i]) < 0) {
 				tigrFree(tigr);
 				deinit_term(&term);
+printf("term feed char failed on line %d\n", __LINE__);
 				return 1;
 			}
 		}
-		
+
+printf("tigr is updating on line %d\n", __LINE__);
 		tigrUpdate(tigr);
+printf("done updating on line %d\n", __LINE__);
 	}
 
 	tigrFree(tigr);
