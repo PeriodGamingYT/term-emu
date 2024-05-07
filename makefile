@@ -1,4 +1,3 @@
-TERM_EXEC = cat main.c
 COMP_FLAGS = 
 ifeq ($(OS), Winows_NT)
 	COMP_FLAGS += -s -lopengl32 -lgdi32
@@ -14,12 +13,12 @@ endif
 make:
 	make clean
 	gcc -o main -Itigr $(COMP_FLAGS) tigr/tigr.c main.c
-	./main $(TERM_EXEC)
+	./main
 
 debug:
 	make clean
 	gcc -o main -g -fsanitize=address -Itigr $(COMP_FLAGS) tigr/tigr.c main.c
-	./main $(TERM_EXEC)
+	./main
 
 clean:
 	clear
