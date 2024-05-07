@@ -18,6 +18,9 @@
 #include <errno.h>
 #include <tigr.h>
 
+#define ARRAY_SIZE(_array) \
+	((int)(sizeof(_array) / sizeof((_array)[0])))
+
 #define CHILD_PID 0
 #define ERR_PID (pid_t)(-1)
 #define SHELL_PATH "/bin/sh"
@@ -396,69 +399,48 @@ int term_feed_char(term_t *term, char feed_char) {
 				case 'K':
 				case 'J': {
 					term->ansi.current_color = term->ansi.default_color;
+					first_int_param = first_int_param == ANSI_INT_PARAM_SKIP
+						? 0
+						: first_int_param > 2
+							? 2
+							: first_int_param;
+					
 					int cursor_index = (
 						(term->cursor_y * TERM_SIZE_X) + 
 						term->cursor_x
 					);
 
+					int start_index = 0;
 					int end_index = TERM_SIZE_X * TERM_SIZE_Y;
-					int loop_start_index = 0;
-					int loop_end_index = 0;
-					switch(first_int_param) {
-						case ANSI_INT_PARAM_SKIP:
-						case 0: {
-							loop_start_index = cursor_index;
-							loop_end_index = end_index;
-							break;
+					int line_start_index = term->cursor_y * TERM_SIZE_X;
+					int line_end_index = (
+						line_start_index + 
+						(TERM_SIZE_X - 1)
+					);
+
+					// 2 for J and K.
+					// 3 for the possible parameters of 0, 1, and 2.
+					// 2 for the start and end indices
+					int clear_range[2][3][2] = {
+						{
+							{ cursor_index, end_index },
+							{ start_index, cursor_index },
+							{ start_index, end_index }
+						},
+
+						{
+							{ cursor_index, line_end_index },
+							{ line_start_index, cursor_index },
+							{ line_start_index, line_end_index }
 						}
+					};
 
-						case 1: {
-							loop_start_index = 0;
-							loop_end_index = cursor_index;
-							break;
-						}
-
-						case 2:
-
-						// reduntant because we don't have scrolling
-						case 3: 
-						default: {
-							loop_start_index = 0;
-							loop_end_index = end_index;
-							break;
-						}
-					}
-
-					if(first_param_repr == 'K') {
-						int line_start_index = term->cursor_y * TERM_SIZE_X;
-						int line_end_index = (
-							line_start_index + 
-							(TERM_SIZE_X - 1)
-						);
-						
-						switch(first_int_param) {
-							case ANSI_INT_PARAM_SKIP:
-							case 0: {
-								loop_start_index = cursor_index;
-								loop_end_index = line_end_index;
-								break;
-							}
-
-							case 1: {
-								loop_start_index = line_start_index;
-								loop_end_index = cursor_index;
-								break;
-							}
-
-							case 2:
-							default: {
-								loop_start_index = line_start_index;
-								loop_end_index = line_end_index;
-								break;
-							}
-						}
-					}
-
+					int is_k = first_param_repr == 'K';
+					int loop_start_index = (
+						clear_range[is_k][first_int_param][0]
+					);
+					
+					int loop_end_index = clear_range[is_k][first_int_param][1];
 					for(
 						int i = loop_start_index;
 						i < loop_end_index;
@@ -490,14 +472,53 @@ int term_feed_char(term_t *term, char feed_char) {
 
 						case 'm': {
 
-							// to be done
+							// using vga palette
+							TPixel colors[] = {
+								tigrRGB(0, 0, 0),
+								tigrRGB(255, 0, 0),
+								tigrRGB(0, 255, 0),
+								tigrRGB(255, 128, 0),
+								tigrRGB(0, 0, 255),
+								tigrRGB(255, 0, 255),
+								tigrRGB(0, 255, 255),
+								tigrRGB(255, 255, 255)								
+							};
+
+							if(
+								first_int_param >= 30 && 
+								first_int_param <= 37
+							) {
+								term->ansi.current_color = (
+									colors[second_int_param - 30]
+								);
+							}
+
+							if(
+								first_int_param == 0 ||
+								first_int_param == 39
+							) {
+								term->ansi.current_color = (
+									term->ansi.default_color
+								);
+							}
+							
 							break;	
 						}
 						
 						case ';': {
-
-							// this only happens with select graphics
-							// rendition, to do	
+							if(
+								first_int_param != 38 || 
+								second_int_param != 2
+							) {
+								break;
+							}
+							
+							term->ansi.current_color = tigrRGB(
+								term->ansi.int_params[2],
+								term->ansi.int_params[3],
+								term->ansi.int_params[4]
+							);
+							
 							break;	
 						}
 
@@ -535,6 +556,11 @@ int term_feed_char(term_t *term, char feed_char) {
 		}
 
 		case '\b': {
+
+			// get rid of some characters for the sake of backspace working
+			// as it should, since input is also put into here
+			term->ansi.color_image[index] = term->ansi.default_color;
+			term->term_image[index] = ' ';
 			if(term->cursor_x > 0) {
 				term->cursor_x--;
 			}
@@ -580,6 +606,34 @@ int term_feed_char(term_t *term, char feed_char) {
 
 		// cant fail because term is not null at this point
 		term_make_room(term);
+	}
+
+	return 0;
+}
+
+int term_write_input(term_t *term, char *buf, int size) {
+	if(
+		term == NULL ||
+		buf == NULL ||
+		size < 0
+	) {
+		return -1;
+	}
+
+	for(int i = 0; buf[i] != 0 && i < size; i++) {
+		if(
+			write(
+				term->tty.top_desc, 
+				&buf[i], 
+				sizeof(char)
+			) < 0
+		) {
+			return -1;
+		}
+		
+		if(term_feed_char(term, buf[i]) < 0) {
+			return -1;
+		}
 	}
 
 	return 0;
@@ -632,6 +686,132 @@ int main(int argc, char **argv, char **envp) {
 
 	term.ansi.tigr = tigr;
 	while(!tigrClosed(tigr)) {
+		int last_char = tigrReadChar(tigr);
+printf("last char is '%c' on line %d\n", last_char, __LINE__);
+		if(last_char != 0) {
+			if(
+
+				// don't check uppercase to allow implementation
+				// of ctrl+shift+c and ctrl+shift+v or copying/pasting
+				last_char >= 'a' && 
+				last_char <= 'z' &&
+				tigrKeyHeld(tigr, TK_CONTROL)
+			) {
+
+				// trick to get control-key versions of ascii
+				// characters
+				last_char &= 0x1f;
+			}
+
+
+
+			if(
+				last_char >= ' ' &&
+				last_char <= '~' &&
+				term_write_input(
+					&term, 
+					(char *)(&last_char), 
+					sizeof(char)
+				) < 0
+			) {
+				tigrFree(tigr);
+				deinit_term(&term);
+				return 1;
+			}
+		}
+
+		// this is just awful, the pure, plain essence of awfulness.
+		// my hope is that this code is so bad im never allowed to write
+		// a terminal emulator ever again
+		char key_to_term[][5] = {
+			{ '0', 0, 0, 0, 0 },
+			{ '1', 0, 0, 0, 0 },
+			{ '2', 0, 0, 0, 0 },
+			{ '3', 0, 0, 0, 0 },
+			{ '4', 0, 0, 0, 0 },
+			{ '5', 0, 0, 0, 0 },
+			{ '6', 0, 0, 0, 0 },
+			{ '7', 0, 0, 0, 0 },
+			{ '8', 0, 0, 0, 0 },
+			{ '9', 0, 0, 0, 0 },
+			{ '*', 0, 0, 0, 0 },
+			{ '+', 0, 0, 0, 0 },
+			{ '\n', 0, 0, 0, 0 },
+			{ '-', 0, 0, 0, 0 },
+			{ '.', 0, 0, 0, 0 }, 
+			{ '/', 0, 0, 0, 0 },
+			{ 27, 79, 80, 0, 0 },
+			{ 27, 79, 81, 0, 0 },
+			{ 27, 79, 82, 0, 0 },
+			{ 27, 79, 83, 0, 0 },
+			{ 27, 91, 49, 53, 126 },
+			{ 27, 91, 49, 55, 126 },
+			{ 27, 91, 49, 56, 126 },
+			{ 27, 91, 49, 57, 126 },
+			{ 27, 91, 50, 48, 126 },
+			{ 27, 91, 50, 49, 126 },
+			{ 27, 91, 50, 51, 126 },
+			{ 27, 91, 50, 52, 126 },
+			{ 127, 0, 0, 0, 0 }, 
+			{ 9, 0, 0, 0, 0 }, 
+			{ 13, 0, 0, 0, 0 }, 
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 27, 0, 0, 0, 0 }, 
+			{ ' ', 0, 0, 0, 0 },
+			{ 27, 91, 53, 126, 0 }, 
+			{ 27, 91, 54, 126, 0 }, 
+			{ 27, 91, 52, 126, 0 },
+			{ 27, 91, 72, 0, 0 }, 
+			{ 27, 91, 68, 0, 0 }, 
+			{ 27, 91, 65, 0, 0 }, 
+			{ 27, 91, 67, 0, 0 },
+			{ 27, 91, 66, 0, 0 }, 
+			{ 27, 91, 52, 104, 0 }, 
+			{ 27, 91, 80, 0, 0 }, 
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 },
+			{ 0, 0, 0, 0, 0 }, 
+			{ ';', 0, 0, 0, 0 },
+			{ '=', 0, 0, 0, 0 },
+			{ ',', 0, 0, 0, 0 },
+			{ '-', 0, 0, 0, 0 },
+			{ '.', 0, 0, 0, 0 },
+			{ '/', 0, 0, 0, 0 },
+			{ '`', 0, 0, 0, 0 },
+			{ '[', 0, 0, 0, 0 },
+			{ '\\', 0, 0, 0, 0 },
+			{ ']', 0, 0, 0, 0 },
+			{ '\'', 0, 0, 0, 0 }
+		};
+
+		int index = last_char - 128;
+		for(int i = 0; i < ARRAY_SIZE(key_to_term); i++) {
+if(tigrKeyDown(tigr, i + 128)){printf("key was down on line %d!\n",__LINE__);}
+			if(
+				tigrKeyDown(tigr, i + 128) &&
+				term_write_input(
+					&term,
+					key_to_term[i],
+					sizeof(int[5])
+				) < 0
+			) {
+				tigrFree(tigr);
+				deinit_term(&term);
+				return 1;
+			}
+		}
+		
 		char fetched_buf[TERM_BUF_SIZE] = { 0 };
 		int fetch_result = term_fetch(
 			&term, 
