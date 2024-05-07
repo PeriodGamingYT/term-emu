@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <pty.h>
-#include <sys/select.h>
 #include <sys/ioctl.h>
 #include <string.h>
 #include <ctype.h>
@@ -53,7 +52,6 @@ typedef struct {
 } tty_t;
 
 typedef struct {
-	fd_set desc_in;
 	int input_ready;
 	int is_read_end;
 } input_t;
@@ -118,7 +116,12 @@ int init_term(term_t *term) {
 
 	// opentty is far superior, but i use posix_openpt
 	// and its friends for compatability
-	term->tty.top_desc = posix_openpt(O_RDWR | O_NOCTTY);
+	term->tty.top_desc = posix_openpt(
+		O_RDWR | 
+		O_NOCTTY | 
+		O_NONBLOCK
+	);
+	
 	if(
 		term->tty.top_desc < 0 ||
 		grantpt(term->tty.top_desc) < 0 ||
@@ -224,7 +227,6 @@ int init_term(term_t *term) {
  	return 0;
 }
 
-// something in here errors out, to do
 int term_fetch(
 	term_t *term, 
 	char *fetched_buf,
@@ -244,50 +246,35 @@ int term_fetch(
 	if(term->input.is_read_end || buf_size == 0) {
 		return 0;
 	}
+	
+	int read_result = read(
+		term->tty.top_desc, 
+		fetched_buf, 
+		buf_size
+	);
+	
+	if(read_result < 0) {
 
-	FD_ZERO(&term->input.desc_in);
-	FD_SET(term->tty.top_desc, &term->input.desc_in);
-	if(
-		select(
+		// eio happens when bottom file closes and is done writing
+		// to the top file
+		if(errno == EIO) {
+			term->input.is_read_end = 1;
+			return 1;
+		}
 
-			// dont know why the addition is there
-			term->tty.top_desc + 1,
-			&term->input.desc_in,
-			NULL,
-			NULL,
-			NULL
-		) < 0
-	) {
+		if(errno == EWOULDBLOCK) {
+			return 0;
+		}
+		
 		deinit_term(term);
 		return -1;
 	}
 
-	if(FD_ISSET(term->tty.top_desc, &term->input.desc_in)) {
-		int read_result = read(
-			term->tty.top_desc, 
-			fetched_buf, 
-			buf_size
-		);
-		
-		if(read_result < 0) {
-
-			// EIO happens when bottom file closes and is done writing
-			// to the top file
-			if(errno == EIO) {
-				term->input.is_read_end = 1;
-				return 1;
-			}
-			
-			deinit_term(term);
-			return -1;
-		}
-	
-		// if read_result is zero that means the program
-		// is done sending input
-		if(read_result == 0) {
-			term->input.is_read_end = 1;
-			return 1;
-		}
+	// if read_result is zero that means the program
+	// is done sending input
+	if(read_result == 0) {
+		term->input.is_read_end = 1;
+		return 1;
 	}
 
 	// for input, just get tigr keyboard input
@@ -297,8 +284,6 @@ int term_fetch(
 	return 0;
 }
 
-// may need to be reworked to have entire main loop inside here
-// because of escape codes
 int term_feed_char(term_t *term, char feed_char) {
 	if(term == NULL) {
 		return -1;
@@ -315,8 +300,7 @@ int term_feed_char(term_t *term, char feed_char) {
 	}
 
 	// see https://en.wikipedia.org/wiki/ANSI_escape_code
-	// to see reference for this implementation, some of the worst
-	// code i have ever wrote
+	// to see reference for this implementation
 	if(term->ansi.is_ansi_mode) {
 
 		// this is a hack that takes advantage of how ifs in c work.
@@ -348,190 +332,11 @@ int term_feed_char(term_t *term, char feed_char) {
 		}
 
 		// if the index didn't change, that means we hit the end
-		// of the ansi parameters, and now its time to parse
+		// of the ansi parameters, and go back to normal, ansi
+		// escape codes are a horrible nightmare and i don't want them
+		// in my code
 		if(*index == old_index) {
 			term->ansi.is_ansi_mode = 0;
-			char first_param_repr = term->ansi.param_type_repr[0];
-			int first_int_param = term->ansi.int_params[0];
-			switch(first_param_repr) {
-				case 'E':
-				case 'A': {
-					term->cursor_y += first_int_param == ANSI_INT_PARAM_SKIP 
-						? 1 
-						: first_int_param + 1;
-					
-					break;
-				}
-
-				case 'F':
-				case 'B': {
-					term->cursor_y -= first_int_param == ANSI_INT_PARAM_SKIP 
-						? 1 
-						: first_int_param + 1;
-					
-					break;
-				}
-
-				case 'C': {
-					term->cursor_x += first_int_param == ANSI_INT_PARAM_SKIP 
-						? 1 
-						: first_int_param + 1;
-					
-					break;
-				}
-
-				case 'D': {
-					term->cursor_x -= first_int_param == ANSI_INT_PARAM_SKIP 
-						? 1 
-						: first_int_param + 1;
-					
-					break;
-				}
-
-				case 'G': {
-					term->cursor_x = first_int_param == ANSI_INT_PARAM_SKIP
-						? 1
-						: first_int_param + 1;
-
-					break;
-				}
-
-				case 'K':
-				case 'J': {
-					term->ansi.current_color = term->ansi.default_color;
-					first_int_param = first_int_param == ANSI_INT_PARAM_SKIP
-						? 0
-						: first_int_param > 2
-							? 2
-							: first_int_param;
-					
-					int cursor_index = (
-						(term->cursor_y * TERM_SIZE_X) + 
-						term->cursor_x
-					);
-
-					int start_index = 0;
-					int end_index = TERM_SIZE_X * TERM_SIZE_Y;
-					int line_start_index = term->cursor_y * TERM_SIZE_X;
-					int line_end_index = (
-						line_start_index + 
-						(TERM_SIZE_X - 1)
-					);
-
-					// 2 for J and K.
-					// 3 for the possible parameters of 0, 1, and 2.
-					// 2 for the start and end indices
-					int clear_range[2][3][2] = {
-						{
-							{ cursor_index, end_index },
-							{ start_index, cursor_index },
-							{ start_index, end_index }
-						},
-
-						{
-							{ cursor_index, line_end_index },
-							{ line_start_index, cursor_index },
-							{ line_start_index, line_end_index }
-						}
-					};
-
-					int is_k = first_param_repr == 'K';
-					int loop_start_index = (
-						clear_range[is_k][first_int_param][0]
-					);
-					
-					int loop_end_index = clear_range[is_k][first_int_param][1];
-					for(
-						int i = loop_start_index;
-						i < loop_end_index;
-						i++
-					) {
-						term->ansi.color_image[i] = term->ansi.default_color;
-						term->term_image[i] = ' ';
-					}
-
-					break;
-				}
-
-				case ';': {
-					char second_param_repr = term->ansi.param_type_repr[1];
-					int second_int_param = term->ansi.int_params[1];
-					switch(second_param_repr) {
-						case 'f':
-						case 'H': {
-							term->cursor_y = first_int_param == ANSI_INT_PARAM_SKIP
-								? 1
-								: first_int_param + 1;
-
-							term->cursor_x = second_int_param == ANSI_INT_PARAM_SKIP
-								? 1
-								: second_int_param + 1;
-
-							break;
-						}
-
-						case 'm': {
-
-							// using vga palette
-							TPixel colors[] = {
-								tigrRGB(0, 0, 0),
-								tigrRGB(255, 0, 0),
-								tigrRGB(0, 255, 0),
-								tigrRGB(255, 128, 0),
-								tigrRGB(0, 0, 255),
-								tigrRGB(255, 0, 255),
-								tigrRGB(0, 255, 255),
-								tigrRGB(255, 255, 255)								
-							};
-
-							if(
-								first_int_param >= 30 && 
-								first_int_param <= 37
-							) {
-								term->ansi.current_color = (
-									colors[second_int_param - 30]
-								);
-							}
-
-							if(
-								first_int_param == 0 ||
-								first_int_param == 39
-							) {
-								term->ansi.current_color = (
-									term->ansi.default_color
-								);
-							}
-							
-							break;	
-						}
-						
-						case ';': {
-							if(
-								first_int_param != 38 || 
-								second_int_param != 2
-							) {
-								break;
-							}
-							
-							term->ansi.current_color = tigrRGB(
-								term->ansi.int_params[2],
-								term->ansi.int_params[3],
-								term->ansi.int_params[4]
-							);
-							
-							break;	
-						}
-
-						default: {
-							break;
-						}
-					}
-				}
-
-				default: {
-					break;
-				}
-			}
 		}
 
 		return 0;
@@ -555,6 +360,7 @@ int term_feed_char(term_t *term, char feed_char) {
 			break;
 		}
 
+		case 127:
 		case '\b': {
 
 			// get rid of some characters for the sake of backspace working

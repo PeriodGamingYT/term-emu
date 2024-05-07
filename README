@@ -1,0 +1,12 @@
+an incredibly basic terminal emulator, where it has the bare minimum 
+implemented.
+
+posix, unix, terminals, shells are all horrible, crufty, and just awful pieces
+of garbage ever to be produced by humanity.
+
+on a positive note, the silver lining of this project is now i know what kinds
+of things i would need to solve if i were to make my own software stack from
+scratch, and now im using the tigr library for graphics, instead of sdl.
+
+sdl is okay, but it's massive, tigr isn't, and it does what i need so it ended
+up being a better fit for me
